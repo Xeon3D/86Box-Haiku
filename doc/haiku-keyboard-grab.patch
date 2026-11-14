@@ -1,0 +1,729 @@
+diff --git a/headers/os/interface/Window.h b/headers/os/interface/Window.h
+index 65c9444..d575d01 100644
+--- a/headers/os/interface/Window.h
++++ b/headers/os/interface/Window.h
+@@ -208,6 +208,9 @@ public:
+ 			bool				IsFront() const;
+ 			bool				IsActive() const;
+ 
++			status_t			SetKeyboardGrab(bool grab);
++			bool				HasKeyboardGrab() const;
++
+ 			void				SetKeyMenuBar(BMenuBar* bar);
+ 			BMenuBar*			KeyMenuBar() const;
+ 
+diff --git a/headers/private/app/ServerProtocol.h b/headers/private/app/ServerProtocol.h
+index b9fc05b..8a5de11 100644
+--- a/headers/private/app/ServerProtocol.h
++++ b/headers/private/app/ServerProtocol.h
+@@ -109,6 +109,8 @@ enum {
+ 	AS_SET_SIZE_LIMITS,
+ 	AS_ACTIVATE_WINDOW,
+ 	AS_IS_FRONT_WINDOW,
++	AS_SET_KEYBOARD_GRAB,
++	AS_GET_KEYBOARD_GRAB,
+ 
+ 	// BPicture definitions
+ 	AS_CREATE_PICTURE,
+diff --git a/headers/private/input/InputServerTypes.h b/headers/private/input/InputServerTypes.h
+index 68163da..5996254 100644
+--- a/headers/private/input/InputServerTypes.h
++++ b/headers/private/input/InputServerTypes.h
+@@ -48,6 +48,7 @@
+ // app_server communication
+ #define IS_ACQUIRE_INPUT				'Iaqi'
+ #define IS_RELEASE_INPUT				'Irli'
++#define IS_SET_KEYBOARD_GRAB			'Iskg'
+ 
+ // Method Replicant
+ #define IS_SET_METHOD					'MRsm'
+diff --git a/src/add-ons/input_server/filters/shortcut_catcher/ShortcutsServerFilter.cpp b/src/add-ons/input_server/filters/shortcut_catcher/ShortcutsServerFilter.cpp
+index a98feec..48d63c7 100644
+--- a/src/add-ons/input_server/filters/shortcut_catcher/ShortcutsServerFilter.cpp
++++ b/src/add-ons/input_server/filters/shortcut_catcher/ShortcutsServerFilter.cpp
+@@ -72,6 +72,10 @@ ShortcutsServerFilter::Filter(BMessage* message, BList* outList)
+ 		case B_KEY_UP:
+ 		case B_UNMAPPED_KEY_DOWN:
+ 		case B_UNMAPPED_KEY_UP:
++			// The focused window has grabbed the keyboard: leave its keys
++			// alone
++			if (message->GetBool("be:keyboard_grab", false))
++				break;
+ 			result = fMap->KeyEvent(message, outList, fMessenger);
+ 			break;
+ 
+diff --git a/src/add-ons/input_server/filters/switch_workspace/SwitchWorkspaceInputFilter.cpp b/src/add-ons/input_server/filters/switch_workspace/SwitchWorkspaceInputFilter.cpp
+index 8d751e5..b65d536 100644
+--- a/src/add-ons/input_server/filters/switch_workspace/SwitchWorkspaceInputFilter.cpp
++++ b/src/add-ons/input_server/filters/switch_workspace/SwitchWorkspaceInputFilter.cpp
+@@ -39,6 +39,10 @@ SwitchWorkspaceInputFilter::Filter(BMessage* message, BList* _list)
+ 	switch (message->what) {
+ 		case B_KEY_DOWN:
+ 		{
++			// The focused window has grabbed the keyboard
++			if (message->GetBool("be:keyboard_grab", false))
++				break;
++
+ 			const char* bytes;
+ 			if (message->FindString("bytes", &bytes) != B_OK)
+ 				break;
+diff --git a/src/kits/interface/Window.cpp b/src/kits/interface/Window.cpp
+index a15007d..49083fb 100644
+--- a/src/kits/interface/Window.cpp
++++ b/src/kits/interface/Window.cpp
+@@ -778,6 +778,57 @@ BWindow::IsFront() const
+ }
+ 
+ 
++/*!	Asks the app_server to route all keyboard input to this window, including
++	the key combinations that are normally consumed by the system (workspace
++	switching, global shortcuts, the window switcher, and BWindow's own
++	built-in shortcuts).
++
++	Only the window that currently has focus can grab the keyboard. The grab
++	is released automatically as soon as the window loses focus (which
++	includes being hidden, minimized, moved off the current workspace or
++	closed), or when the application quits. The secure attention sequence
++	(Control+Command+Delete, which opens the Team monitor) and the
++	"safe video mode" combination always reach the system.
++
++	
++	\return \c B_OK if the grab was set or released, \c B_NOT_ALLOWED if the
++		window doesn't have focus, or another error code.
++*/
++status_t
++BWindow::SetKeyboardGrab(bool grab)
++{
++	BAutolock locker(this);
++	if (!locker.IsLocked())
++		return B_BAD_VALUE;
++
++	fLink->StartMessage(AS_SET_KEYBOARD_GRAB);
++	fLink->Attach<bool>(grab);
++
++	status_t status;
++	if (fLink->FlushWithReply(status) != B_OK)
++		return B_ERROR;
++
++	return status;
++}
++
++
++bool
++BWindow::HasKeyboardGrab() const
++{
++	BAutolock locker(const_cast<BWindow*>(this));
++	if (!locker.IsLocked())
++		return false;
++
++	fLink->StartMessage(AS_GET_KEYBOARD_GRAB);
++
++	status_t status;
++	if (fLink->FlushWithReply(status) == B_OK)
++		return status == B_OK;
++
++	return false;
++}
++
++
+ void
+ BWindow::MessageReceived(BMessage* message)
+ {
+@@ -3686,6 +3737,11 @@ BWindow::_HandleKeyDown(BMessage* event)
+ 	if (!_IsFocusMessage(event))
+ 		return false;
+ 
++	// While this window holds a keyboard grab, every key goes to the focus
++	// view untouched - no menu, navigation, switcher, or shortcut handling.
++	if (event->GetBool("be:keyboard_grab", false))
++		return false;
++
+ 	const char* bytes;
+ 	if (event->FindString("bytes", &bytes) != B_OK)
+ 		return false;
+@@ -3858,6 +3914,9 @@ BWindow::_HandleUnmappedKeyDown(BMessage* event)
+ 	if (!_IsFocusMessage(event))
+ 		return false;
+ 
++	if (event->GetBool("be:keyboard_grab", false))
++		return false;
++
+ 	uint32 modifiers;
+ 	int32 rawKey;
+ 	if (event->FindInt32("modifiers", (int32*)&modifiers) != B_OK
+diff --git a/src/servers/app/Desktop.cpp b/src/servers/app/Desktop.cpp
+index 3d40a7c..79a210e 100644
+--- a/src/servers/app/Desktop.cpp
++++ b/src/servers/app/Desktop.cpp
+@@ -190,8 +190,26 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
+ 	message->FindInt32("key", &key);
+ 	message->FindInt32("modifiers", &modifiers);
+ 
+-	if ((message->what == B_KEY_DOWN || message->what == B_UNMAPPED_KEY_DOWN)) {
++	if (message->what == B_KEY_DOWN
++		|| message->what == B_MODIFIERS_CHANGED
++		|| message->what == B_UNMAPPED_KEY_DOWN
++		|| message->what == B_INPUT_METHOD_EVENT)
++		_UpdateFocus(key, modifiers, _target);
++
++	// The app_server is the authority on keyboard grabs: never trust a
++	// "be:keyboard_grab" field set by someone else, and mark the event if it
++	// is going to the window that holds the grab.
++	message->RemoveName("be:keyboard_grab");
++	bool grabbed = fDesktop->IsKeyboardGrabTarget(*_target);
++	if (grabbed)
++		message->AddBool("be:keyboard_grab", true);
++
++	bool isKeyDown = message->what == B_KEY_DOWN
++		|| message->what == B_UNMAPPED_KEY_DOWN;
++
++	if (isKeyDown) {
+ 		// Check for safe video mode (shift + cmd + ctrl + escape)
++		// This must keep working even while the keyboard is grabbed.
+ 		if (key == 0x01 && (modifiers & B_COMMAND_KEY) != 0
+ 			&& (modifiers & B_CONTROL_KEY) != 0
+ 			&& (modifiers & B_SHIFT_KEY) != 0) {
+@@ -199,6 +217,13 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
+ 			return B_SKIP_MESSAGE;
+ 		}
+ 
++		if (grabbed) {
++			// The window holding the grab gets every other key, including
++			// the ones that would switch workspaces or that desktop
++			// listeners (like Stack & Tile) would consume.
++			return B_DISPATCH_MESSAGE;
++		}
++
+ 		bool takeWindow = (modifiers & B_SHIFT_KEY) != 0
+ 			|| fDesktop->MouseEventWindow() != NULL;
+ 		if (key >= B_F1_KEY && key <= B_F12_KEY) {
+@@ -225,12 +250,6 @@ KeyboardFilter::Filter(BMessage* message, EventTarget** _target,
+ 		}
+ 	}
+ 
+-	if (message->what == B_KEY_DOWN
+-		|| message->what == B_MODIFIERS_CHANGED
+-		|| message->what == B_UNMAPPED_KEY_DOWN
+-		|| message->what == B_INPUT_METHOD_EVENT)
+-		_UpdateFocus(key, modifiers, _target);
+-
+ 	return fDesktop->KeyEvent(message->what, key, modifiers);
+ }
+ 
+@@ -439,6 +458,7 @@ Desktop::Desktop(uid_t userID, const char* targetScreen)
+ 	fMouseEventWindow(NULL),
+ 	fWindowUnderMouse(NULL),
+ 	fLockedFocusWindow(NULL),
++	fKeyboardGrabWindow(NULL),
+ 	fViewUnderMouse(B_NULL_TOKEN),
+ 	fLastMousePosition(B_ORIGIN),
+ 	fLastMouseButtons(0),
+@@ -1781,6 +1801,9 @@ Desktop::RemoveWindow(Window *window)
+ 
+ 	NotifyWindowRemoved(window);
+ 
++	if (fKeyboardGrabWindow == window)
++		_ReleaseKeyboardGrab();
++
+ 	UnlockAllWindows();
+ 
+ 	// make sure this window won't get any events anymore
+@@ -2153,6 +2176,10 @@ Desktop::SetFocusWindow(Window* nextFocus)
+ 
+ 	fFocus = nextFocus;
+ 
++	// A keyboard grab never survives a focus change
++	if (fKeyboardGrabWindow != NULL && fKeyboardGrabWindow != fFocus)
++		_ReleaseKeyboardGrab();
++
+ 	if (fFocus != NULL) {
+ 		fFocus->SetFocus(true);
+ 		newActiveApp = fFocus->ServerWindow()->App()->ClientTeam();
+@@ -2203,6 +2230,79 @@ Desktop::SetFocusLocked(const Window* window)
+ }
+ 
+ 
++/*!	Grabs or releases the keyboard for \a window.
++
++	While a window holds the grab, every keyboard event that is routed to it
++	bypasses the global shortcuts of the app_server (workspace switching,
++	desktop listeners), is marked with a "be:keyboard_grab" field (so that
++	BWindow skips its built-in shortcuts), and the input_server is told to
++	mark events for its filter add-ons as well.
++
++	Only the focus window can grab the keyboard, and the grab is released
++	as soon as the window loses focus or is removed. The secure attention
++	sequence (Team monitor) is handled in the input_server's keyboard device
++	before any of this, and is therefore never affected.
++*/
++status_t
++Desktop::SetKeyboardGrab(Window* window, bool grab)
++{
++	if (window == NULL)
++		return B_BAD_VALUE;
++
++	if (!LockAllWindows())
++		return B_ERROR;
++
++	status_t status = B_OK;
++
++	if (grab) {
++		if (window != fFocus || window->IsHidden())
++			status = B_NOT_ALLOWED;
++		else if (fKeyboardGrabWindow != window) {
++			fKeyboardGrabWindow = window;
++			// Notify while still holding the lock, so that the input_server
++			// always sees grab state changes in the right order
++			fEventDispatcher.SetKeyboardGrab(true);
++		}
++	} else if (fKeyboardGrabWindow == window)
++		_ReleaseKeyboardGrab();
++
++	UnlockAllWindows();
++	return status;
++}
++
++
++/*!	Releases the current keyboard grab, if any.
++	You must hold the all window lock when calling this method.
++*/
++void
++Desktop::_ReleaseKeyboardGrab()
++{
++	if (fKeyboardGrabWindow == NULL)
++		return;
++
++	fKeyboardGrabWindow = NULL;
++	fEventDispatcher.SetKeyboardGrab(false);
++}
++
++
++/*!	Returns whether keyboard events for \a target should bypass the global
++	keyboard shortcuts, ie. whether it belongs to the window holding the
++	keyboard grab.
++*/
++bool
++Desktop::IsKeyboardGrabTarget(EventTarget* target)
++{
++	if (target == NULL || !LockSingleWindow())
++		return false;
++
++	bool grabbed = fKeyboardGrabWindow != NULL
++		&& target == &fKeyboardGrabWindow->EventTarget();
++
++	UnlockSingleWindow();
++	return grabbed;
++}
++
++
+ Window*
+ Desktop::FindWindowByClientToken(int32 token, team_id teamID)
+ {
+diff --git a/src/servers/app/Desktop.h b/src/servers/app/Desktop.h
+index 743f65f..9b95f0f 100644
+--- a/src/servers/app/Desktop.h
++++ b/src/servers/app/Desktop.h
+@@ -237,6 +237,11 @@ public:
+ 			void				SetFocusWindow(Window* window = NULL);
+ 			void				SetFocusLocked(const Window* window);
+ 
++			status_t			SetKeyboardGrab(Window* window, bool grab);
++			Window*				KeyboardGrabWindow() const
++									{ return fKeyboardGrabWindow; }
++			bool				IsKeyboardGrabTarget(EventTarget* target);
++
+ 			Window*				FindWindowByClientToken(int32 token,
+ 									team_id teamID);
+ 			EventTarget*		FindTarget(BMessenger& messenger);
+@@ -291,6 +296,7 @@ private:
+ 			void				_UpdateFronts(bool updateFloating = true);
+ 			bool				_WindowHasModal(Window* window) const;
+ 			bool				_WindowCanHaveFocus(Window* window) const;
++			void				_ReleaseKeyboardGrab();
+ 
+ 			void				_WindowChanged(Window* window);
+ 			void				_WindowRemoved(Window* window);
+@@ -375,6 +381,7 @@ private:
+ 			Window*				fMouseEventWindow;
+ 			const Window*		fWindowUnderMouse;
+ 			const Window*		fLockedFocusWindow;
++			Window*				fKeyboardGrabWindow;
+ 			int32				fViewUnderMouse;
+ 			BPoint				fLastMousePosition;
+ 			int32				fLastMouseButtons;
+diff --git a/src/servers/app/EventDispatcher.cpp b/src/servers/app/EventDispatcher.cpp
+index 4e129f2..079d628 100644
+--- a/src/servers/app/EventDispatcher.cpp
++++ b/src/servers/app/EventDispatcher.cpp
+@@ -575,6 +575,22 @@ EventDispatcher::IdleTime()
+ }
+ 
+ 
++/*!	Forwards the keyboard grab state to the event stream.
++	This deliberately does not lock the dispatcher: it is called by the Desktop
++	that may still hold the window lock, while the event loop holds the
++	dispatcher lock when it calls into the keyboard filter, which in turn
++	needs the window lock. fStream is only changed in SetTo() during startup,
++	and EventStream::SetKeyboardGrab() must not block.
++*/
++void
++EventDispatcher::SetKeyboardGrab(bool grab)
++{
++	EventStream* stream = fStream;
++	if (stream != NULL)
++		stream->SetKeyboardGrab(grab);
++}
++
++
+ bool
+ EventDispatcher::HasCursorThread()
+ {
+diff --git a/src/servers/app/EventDispatcher.h b/src/servers/app/EventDispatcher.h
+index 6ff3c22..40fdf16 100644
+--- a/src/servers/app/EventDispatcher.h
++++ b/src/servers/app/EventDispatcher.h
+@@ -87,6 +87,8 @@ class EventDispatcher : public BLocker {
+ 		void SendFakeMouseMoved(EventTarget& target, int32 viewToken);
+ 		bigtime_t IdleTime();
+ 
++		void SetKeyboardGrab(bool grab);
++
+ 		bool HasCursorThread();
+ 		void SetHWInterface(HWInterface* interface);
+ 
+diff --git a/src/servers/app/EventStream.cpp b/src/servers/app/EventStream.cpp
+index aa50275..b639e26 100644
+--- a/src/servers/app/EventStream.cpp
++++ b/src/servers/app/EventStream.cpp
+@@ -45,6 +45,12 @@ EventStream::GetNextCursorPosition(BPoint& where, bigtime_t timeout)
+ }
+ 
+ 
++void
++EventStream::SetKeyboardGrab(bool grab)
++{
++}
++
++
+ //	#pragma mark -
+ 
+ 
+@@ -122,6 +128,21 @@ InputServerStream::UpdateScreenBounds(BRect bounds)
+ }
+ 
+ 
++/*!	Tells the input_server whether a window currently holds a keyboard grab,
++	so that it can mark keyboard events for its filter add-ons, which then
++	should not act on global shortcuts.
++*/
++void
++InputServerStream::SetKeyboardGrab(bool grab)
++{
++	BMessage message(IS_SET_KEYBOARD_GRAB);
++	message.AddBool("grab", grab);
++
++	// Never block the app_server on the input_server for long
++	fInputServer.SendMessage(&message, (BHandler*)NULL, 50000);
++}
++
++
+ bool
+ InputServerStream::GetNextEvent(BMessage** _event)
+ {
+diff --git a/src/servers/app/EventStream.h b/src/servers/app/EventStream.h
+index 23a33b9..333f6f1 100644
+--- a/src/servers/app/EventStream.h
++++ b/src/servers/app/EventStream.h
+@@ -28,6 +28,7 @@ class EventStream {
+ 		virtual bool SupportsCursorThread() const;
+ 
+ 		virtual void UpdateScreenBounds(BRect bounds) = 0;
++		virtual void SetKeyboardGrab(bool grab);
+ 
+ 		virtual bool GetNextEvent(BMessage** _event) = 0;
+ 		virtual status_t GetNextCursorPosition(BPoint& where,
+@@ -54,6 +55,7 @@ class InputServerStream : public EventStream {
+ 		virtual bool SupportsCursorThread() const { return fCursorSemaphore >= B_OK; }
+ 
+ 		virtual void UpdateScreenBounds(BRect bounds);
++		virtual void SetKeyboardGrab(bool grab);
+ 
+ 		virtual bool GetNextEvent(BMessage** _event);
+ 		virtual status_t GetNextCursorPosition(BPoint& where,
+diff --git a/src/servers/app/ServerWindow.cpp b/src/servers/app/ServerWindow.cpp
+index fd3f262..1842edc 100644
+--- a/src/servers/app/ServerWindow.cpp
++++ b/src/servers/app/ServerWindow.cpp
+@@ -845,6 +845,36 @@ ServerWindow::_DispatchMessage(int32 code, BPrivate::LinkReceiver& link)
+ 			break;
+ 		}
+ 
++		case AS_SET_KEYBOARD_GRAB:
++		{
++			bool grab;
++			if (link.Read<bool>(&grab) != B_OK) {
++				fLink.StartMessage(B_BAD_VALUE);
++				fLink.Flush();
++				break;
++			}
++
++			DTRACE(("ServerWindow %s: Message AS_SET_KEYBOARD_GRAB: %d\n",
++				Title(), grab));
++
++			// Desktop::SetKeyboardGrab() needs the all window lock
++			fDesktop->UnlockSingleWindow();
++			status_t status = fDesktop->SetKeyboardGrab(fWindow.Get(), grab);
++			fDesktop->LockSingleWindow();
++
++			fLink.StartMessage(status);
++			fLink.Flush();
++			break;
++		}
++
++		case AS_GET_KEYBOARD_GRAB:
++		{
++			bool grabbed = fDesktop->KeyboardGrabWindow() == fWindow.Get();
++			fLink.StartMessage(grabbed ? B_OK : B_ERROR);
++			fLink.Flush();
++			break;
++		}
++
+ 		case AS_GET_WORKSPACES:
+ 		{
+ 			DTRACE(("ServerWindow %s: Message AS_GET_WORKSPACES\n", Title()));
+diff --git a/src/servers/input/InputServer.cpp b/src/servers/input/InputServer.cpp
+index c310803..babed43 100644
+--- a/src/servers/input/InputServer.cpp
++++ b/src/servers/input/InputServer.cpp
+@@ -155,6 +155,7 @@ InputServer::InputServer()
+ 	fCursorSem(-1),
+ 	fAppServerPort(-1),
+ 	fAppServerTeam(-1),
++	fKeyboardGrabbed(0),
+ 	fCursorArea(-1)
+ {
+ 	CALLED();
+@@ -533,6 +534,12 @@ InputServer::MessageReceived(BMessage* message)
+ 		case IS_RELEASE_INPUT:
+ 			_ReleaseInput(message);
+ 			return;
++		case IS_SET_KEYBOARD_GRAB:
++			// Sent by the app_server whenever a window grabs or releases
++			// the keyboard
++			atomic_set(&fKeyboardGrabbed,
++				message->GetBool("grab", false) ? 1 : 0);
++			return;
+ 		case IS_SCREEN_BOUNDS_UPDATED:
+ 		{
+ 			// This is what the R5 app_server sends us when the screen
+@@ -1865,6 +1872,25 @@ InputServer::_FilterEvents(EventList& events)
+ 	int32 count = gInputFilterList.CountItems();
+ 	int32 eventCount = events.CountItems();
+ 
++	// While a window holds a keyboard grab, mark keyboard events, so that
++	// filters that implement global shortcuts let them through untouched.
++	// (Filters still see them, so that e.g. the screen saver keeps working.)
++	bool keyboardGrabbed = atomic_get(&fKeyboardGrabbed) != 0;
++	for (int32 i = 0; i < eventCount; i++) {
++		BMessage* event = events.ItemAt(i);
++		switch (event->what) {
++			case B_KEY_DOWN:
++			case B_KEY_UP:
++			case B_UNMAPPED_KEY_DOWN:
++			case B_UNMAPPED_KEY_UP:
++			case B_MODIFIERS_CHANGED:
++				event->RemoveName("be:keyboard_grab");
++				if (keyboardGrabbed)
++					event->AddBool("be:keyboard_grab", true);
++				break;
++		}
++	}
++
+ 	for (int32 i = 0; i < count; i++) {
+ 		BInputServerFilter* filter = (BInputServerFilter*)gInputFilterList.ItemAt(i);
+ 
+diff --git a/src/servers/input/InputServer.h b/src/servers/input/InputServer.h
+index 705cd89..ad012e2 100644
+--- a/src/servers/input/InputServer.h
++++ b/src/servers/input/InputServer.h
+@@ -250,6 +250,7 @@ class InputServer : public BApplication {
+ 		sem_id 			fCursorSem;
+ 		port_id			fAppServerPort;
+ 		team_id			fAppServerTeam;
++		int32			fKeyboardGrabbed;
+ 		area_id			fCursorArea;
+ 		shared_cursor*	fCursorBuffer;
+ };
+diff --git a/src/tests/servers/app/keyboard_grab/GrabTest.cpp b/src/tests/servers/app/keyboard_grab/GrabTest.cpp
+new file mode 100644
+index 0000000..f721b2b
+--- /dev/null
++++ b/src/tests/servers/app/keyboard_grab/GrabTest.cpp
+@@ -0,0 +1,167 @@
++/*
++ * GrabTest - logs every keyboard message a window receives, and toggles a
++ * keyboard grab with a mouse click.
++ *
++ * Build against the patched headers (prototype API):
++ *   g++ -o GrabTest GrabTest.cpp -lbe
++ * On a stock Haiku, build with -DNO_GRAB_API: clicking then only logs what
++ * would be grabbed, which is useful as a "before" baseline.
++ *
++ * Output goes to stdout (run it from Terminal) and is drawn in the window.
++ */
++
++#include <Application.h>
++#include <InterfaceDefs.h>
++#include <String.h>
++#include <View.h>
++#include <Window.h>
++
++#include <stdio.h>
++#include <string.h>
++
++
++static const char*
++what_name(uint32 what)
++{
++	switch (what) {
++		case B_KEY_DOWN:			return "KEY_DOWN";
++		case B_KEY_UP:				return "KEY_UP";
++		case B_UNMAPPED_KEY_DOWN:	return "UNMAPPED_KEY_DOWN";
++		case B_UNMAPPED_KEY_UP:		return "UNMAPPED_KEY_UP";
++		case B_MODIFIERS_CHANGED:	return "MODIFIERS_CHANGED";
++		default:					return NULL;
++	}
++}
++
++
++static BString
++modifier_string(uint32 modifiers)
++{
++	BString string;
++	if (modifiers & B_SHIFT_KEY)	string << "Shift ";
++	if (modifiers & B_COMMAND_KEY)	string << "Cmd ";
++	if (modifiers & B_CONTROL_KEY)	string << "Ctrl ";
++	if (modifiers & B_OPTION_KEY)	string << "Opt ";
++	if (modifiers & B_MENU_KEY)		string << "Menu ";
++	return string;
++}
++
++
++class LogView : public BView {
++public:
++	LogView(BRect frame)
++		:
++		BView(frame, "log", B_FOLLOW_ALL, B_WILL_DRAW),
++		fCount(0)
++	{
++		SetViewColor(ui_color(B_DOCUMENT_BACKGROUND_COLOR));
++		SetHighColor(ui_color(B_DOCUMENT_TEXT_COLOR));
++	}
++
++	virtual void AttachedToWindow()
++	{
++		MakeFocus(true);
++	}
++
++	void Log(const char* line)
++	{
++		printf("%s\n", line);
++		fflush(stdout);
++		fLines[fCount % kLines] = line;
++		fCount++;
++		Invalidate();
++	}
++
++	virtual void Draw(BRect)
++	{
++		font_height height;
++		GetFontHeight(&height);
++		float lineHeight = height.ascent + height.descent + height.leading;
++		int32 first = fCount > kLines ? fCount - kLines : 0;
++		float y = lineHeight;
++		for (int32 i = first; i < fCount; i++, y += lineHeight)
++			DrawString(fLines[i % kLines].String(), BPoint(5, y));
++	}
++
++	virtual void MouseDown(BPoint)
++	{
++		BString line;
++#ifdef NO_GRAB_API
++		line = "click: no grab API in this build";
++#else
++		bool grab = !Window()->HasKeyboardGrab();
++		status_t status = Window()->SetKeyboardGrab(grab);
++		line.SetToFormat("click: SetKeyboardGrab(%s) -> %s, HasKeyboardGrab()"
++			" = %s", grab ? "true" : "false", strerror(status),
++			Window()->HasKeyboardGrab() ? "true" : "false");
++		Window()->SetTitle(Window()->HasKeyboardGrab()
++			? "GrabTest - GRABBED (click to release)"
++			: "GrabTest - click to grab");
++#endif
++		Log(line);
++	}
++
++private:
++	static const int32 kLines = 40;
++	BString	fLines[kLines];
++	int32	fCount;
++};
++
++
++class GrabWindow : public BWindow {
++public:
++	GrabWindow()
++		:
++		BWindow(BRect(100, 100, 700, 700), "GrabTest - click to grab",
++			B_TITLED_WINDOW, B_QUIT_ON_WINDOW_CLOSE)
++	{
++		fView = new LogView(Bounds());
++		AddChild(fView);
++	}
++
++	// Log before BWindow gets a chance to handle (and eat) shortcuts
++	virtual void DispatchMessage(BMessage* message, BHandler* target)
++	{
++		const char* name = what_name(message->what);
++		if (name != NULL) {
++			int32 key = message->GetInt32("key", 0);
++			uint32 modifiers = message->GetInt32("modifiers", 0);
++			const char* bytes = message->GetString("bytes", "");
++			BString line;
++			line.SetToFormat("%-18s key=0x%02" B_PRIx32 " bytes=0x%02x "
++				"mods=%s%s", name, key, (uint8)bytes[0],
++				modifier_string(modifiers).String(),
++				message->GetBool("be:keyboard_grab", false)
++					? " [grab]" : "");
++			fView->Log(line);
++		}
++		BWindow::DispatchMessage(message, target);
++	}
++
++	virtual void WindowActivated(bool active)
++	{
++		BString line;
++		line.SetToFormat("WindowActivated(%s)%s", active ? "true" : "false",
++#ifdef NO_GRAB_API
++			"");
++#else
++			HasKeyboardGrab() ? " - still grabbed?!" : "");
++#endif
++		fView->Log(line);
++		if (!active)
++			SetTitle("GrabTest - click to grab");
++	}
++
++private:
++	LogView*	fView;
++};
++
++
++int
++main()
++{
++	BApplication app("application/x-vnd.test-GrabTest");
++	(new GrabWindow())->Show();
++	app.Run();
++	return 0;
++}
