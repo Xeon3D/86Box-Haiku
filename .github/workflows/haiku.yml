@@ -1,6 +1,7 @@
 name: Haiku
 
-# Builds the Qt 6 version for Haiku R1/beta6 x86_64. GitHub has no Haiku
+# Builds both Haiku versions for R1/beta6 x86_64: the Qt 6 UI and the native
+# Be API UI (-D HAIKU_NATIVE=ON), each as a .zip and an .hpkg. GitHub has no Haiku
 # runners, so the build runs inside a Haiku VM on a Linux runner, started by
 # cross-platform-actions. The sync-upstream workflow starts this after each
 # successful sync.
@@ -35,8 +36,14 @@ concurrency:
 
 jobs:
   build:
-    name: Qt 6, Release, x86_64
+    name: ${{ matrix.ui.name }}, Release, x86_64
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ui:
+          - { id: qt,     name: 'Qt 6',      options: '-D QT=ON -D USE_QT6=ON' }
+          - { id: native, name: 'Native UI', options: '-D HAIKU_NATIVE=ON' }
     timeout-minutes: 240
 
     steps:
@@ -70,7 +77,7 @@ jobs:
         shell: cpa.sh {0} --sync-files runner-to-vm
         run: |
           cmake -S . -B ~/build --preset regular -G Ninja \
-            -D QT=ON -D USE_QT6=ON \
+            ${{ matrix.ui.options }} \
             -D CMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
@@ -81,25 +88,11 @@ jobs:
         shell: cpa.sh {0} --sync-files vm-to-runner
         run: |
           rm -rf dist
-          mkdir -p dist/86Box
-          cp ~/build/src/86Box dist/86Box/
-          strip dist/86Box/86Box
-          cp COPYING dist/86Box/
-          cat > dist/86Box/README-Haiku.txt << 'EOF'
-          86Box for Haiku R1/beta6 x86_64 (Qt 6)
-
-          Install the libraries it needs:
-
-            pkgman install qt6_base libsdl3 openal libsndfile libslirp rtmidi fluidsynth2 mesa
-
-          Then get the ROM set from https://github.com/86Box/roms and put it in
-          a "roms" folder next to the 86Box binary, or in
-          ~/config/non-packaged/data/86Box/roms.
-          EOF
+          bash tools/haiku-package.sh ${{ matrix.ui.id }} ~/build dist
 
       - name: Upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: 86Box-Haiku-x86_64-b${{ github.run_number }}
-          path: dist/86Box/
+          name: 86Box-Haiku-${{ matrix.ui.id }}-x86_64-b${{ github.run_number }}
+          path: dist/
           if-no-files-found: error

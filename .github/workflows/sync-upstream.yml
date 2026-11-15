@@ -50,20 +50,51 @@ jobs:
             echo "conflict=false" >> "$GITHUB_OUTPUT"
           elif grep -q 'HTTP 409' <<<"$out"; then
             echo "conflict=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(gh api "repos/$GITHUB_REPOSITORY" --jq .fork)" = false ]; then
+            # The API only syncs forks; a standalone copy merges with git below.
+            echo "use_git=true" >> "$GITHUB_OUTPUT"
           else
             echo "::error::Sync with upstream failed: $out"
             exit 1
           fi
 
+      # Without a SYNC_TOKEN that has the workflow scope, this push fails when
+      # upstream changed files in .github/workflows.
+      - name: Check out master (not a fork)
+        if: steps.sync.outputs.use_git == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Merge with git (not a fork)
+        id: git
+        if: steps.sync.outputs.use_git == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/86Box/86Box.git
+          git fetch --no-tags upstream master
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          elif git merge --no-edit upstream/master -m "Merge branch '86Box:master' into master"; then
+            git push origin HEAD:master
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          else
+            git merge --abort
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check out master to find the conflicts
-        if: steps.sync.outputs.conflict == 'true'
+        if: steps.sync.outputs.conflict == 'true' || steps.git.outputs.conflict == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: master
           fetch-depth: 0
 
       - name: Report the conflicts
-        if: steps.sync.outputs.conflict == 'true'
+        if: steps.sync.outputs.conflict == 'true' || steps.git.outputs.conflict == 'true'
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -92,7 +123,7 @@ jobs:
           exit 1
 
       - name: Start the Haiku build
-        if: steps.sync.outputs.updated == 'true' && env.HAS_SYNC_TOKEN != 'true'
+        if: (steps.sync.outputs.updated == 'true' || steps.git.outputs.updated == 'true') && env.HAS_SYNC_TOKEN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run haiku.yml --repo "$GITHUB_REPOSITORY" --ref master
