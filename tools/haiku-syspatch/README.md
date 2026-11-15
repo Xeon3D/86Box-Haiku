@@ -13,6 +13,14 @@ packages, such as libbe, the servers or the input_server add-ons.
 
 ## Quick start
 
+The script isn't packaged. Copy it to a folder on `PATH` first, or run it
+by its full path:
+
+```sh
+mkdir -p ~/config/non-packaged/bin
+cp haiku-syspatch ~/config/non-packaged/bin/
+```
+
 ```sh
 haiku-syspatch info                       # what's installed and running
 haiku-syspatch doctor --install-deps      # install the build prerequisites
