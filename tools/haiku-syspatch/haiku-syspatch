@@ -32,7 +32,7 @@ JOBS=${HAIKU_SYSPATCH_JOBS:-$(nproc 2>/dev/null || echo 2)}
 MIRROR=${HAIKU_GIT_MIRROR:-https://github.com/haiku/haiku}
 TAGS_URL=${HAIKU_GIT_TAGS:-https://review.haiku-os.org/haiku}
 SYSPKG=/boot/system/packages
-MIN_FREE_GB=20
+MIN_FREE_GB=8
 
 # git's automatic background maintenance ("git maintenance run --auto",
 # pack-refs) was seen hanging on Haiku after a fetch; never run it here.
@@ -189,6 +189,10 @@ cmd_doctor()
 	if [ -n "$missing" ]; then
 		echo "Missing build prerequisites:$missing"
 		if [ "$INSTALL_DEPS" = 1 ]; then
+			# No -y: gcc_syslibs_devel pins gcc_syslibs (and so gcc) to the
+			# repository version, which can upgrade the compiler and the
+			# system C++ runtime. pkgman shows that plan and asks first.
+			echo "Note: this may also upgrade gcc and gcc_syslibs; read pkgman's plan."
 			pkgman install $missing || die "installing prerequisites failed"
 		else
 			echo "Install them with:  pkgman install$missing"

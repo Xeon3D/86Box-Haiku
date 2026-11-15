@@ -25,7 +25,7 @@ installing.
 | Command | What it does |
 |---|---|
 | `info` | Shows the installed `haiku` package and its version, which is split into series, base `hrev` tag, commits since the tag and local build tag. Also shows the architecture, whether a secondary architecture or `haiku_devel` is installed, and the running kernel revision (`uname -v`). Warns when an update is waiting for a reboot. |
-| `doctor [--install-deps]` | Checks for git, jam, gcc, nasm, bison, flex, python3, the zstd and zlib development libraries and `gcc_syslibs_devel`, and checks free disk space (about 20 GiB). With `--install-deps` it installs the missing pieces with `pkgman`. |
+| `doctor [--install-deps]` | Checks for git, jam, gcc, nasm, bison, flex, python3, the zstd and zlib development libraries and `gcc_syslibs_devel`, and checks free disk space (about 8 GiB). With `--install-deps` it installs the missing pieces with `pkgman`. **`gcc_syslibs_devel` requires the exact same version of `gcc_syslibs`, so installing it can upgrade gcc and the system C++ runtime to the repository version.** On a beta6 VM in November 2026 it upgraded GCC 13.3 to 15.3. pkgman shows its plan before changing anything. |
 | `fetch` | Clones the source and checks out the exact commit the installed system was built from. |
 | `build -p <patch>... [-t <tag>] [-j <jobs>]` | Applies the patches to that commit and builds the replacement packages. The output and a `MANIFEST` go in `~/haiku-syspatch/<hrev>_<n>/out/<version>/`. |
 | `install [--yes] [--force] [dir]` | Backs up the official packages, shows exactly what will be replaced, asks, then runs `pkgman install`. The change takes effect after a reboot. |
