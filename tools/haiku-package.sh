@@ -133,6 +133,7 @@ cp "$readme" "$root/documentation/packages/$pkg/"
 } > "$work/.PackageInfo"
 
 mkdir -p "$out"
+out=$(cd "$out" && pwd)   # package create and zip run in other directories
 hpkg=$out/$pkg-$version-$pkgrev-$arch.hpkg
 rm -f "$hpkg"
 (cd "$root" && package create -q -i "$work/.PackageInfo" "$hpkg")
