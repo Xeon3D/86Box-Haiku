@@ -15,6 +15,7 @@ on:
       - cmake/**
       - "**/CMakeLists.txt"
       - CMakePresets.json
+      - tools/haiku-package.sh
       - .github/workflows/haiku.yml
 
   pull_request:
@@ -23,6 +24,7 @@ on:
       - cmake/**
       - "**/CMakeLists.txt"
       - CMakePresets.json
+      - tools/haiku-package.sh
       - .github/workflows/haiku.yml
 
   workflow_dispatch:
