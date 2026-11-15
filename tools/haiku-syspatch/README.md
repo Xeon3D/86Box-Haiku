@@ -25,7 +25,7 @@ installing.
 | Command | What it does |
 |---|---|
 | `info` | Shows the installed `haiku` package and its version, which is split into series, base `hrev` tag, commits since the tag and local build tag. Also shows the architecture, whether a secondary architecture or `haiku_devel` is installed, and the running kernel revision (`uname -v`). Warns when an update is waiting for a reboot. |
-| `doctor [--install-deps]` | Checks for git, jam, gcc, nasm, bison, flex, python3, the zstd and zlib development libraries and `gcc_syslibs_devel`, and checks free disk space (about 8 GiB). With `--install-deps` it installs the missing pieces with `pkgman`. **`gcc_syslibs_devel` requires the exact same version of `gcc_syslibs`, so installing it can upgrade gcc and the system C++ runtime to the repository version.** On a beta6 VM in November 2026 it upgraded GCC 13.3 to 15.3. pkgman shows its plan before changing anything. |
+| `doctor [--install-deps]` | Checks for git, jam, gcc, make, nasm, bison, flex, m4, makeinfo, autoconf, automake, gawk, python3 and the zstd and zlib development libraries, and checks free disk space (about 8 GiB). With `--install-deps` it installs the missing pieces with `pkgman`, which shows its plan and asks first. It deliberately does **not** need `gcc_syslibs_devel`: that package pins `gcc_syslibs`, and on a beta6 VM in November 2026 installing it upgraded the system GCC from 13.3 to 15.3. |
 | `fetch` | Clones the source and checks out the exact commit the installed system was built from. |
 | `build -p <patch>... [-t <tag>] [-j <jobs>]` | Applies the patches to that commit and builds the replacement packages. The output and a `MANIFEST` go in `~/haiku-syspatch/<hrev>_<n>/out/<version>/`. |
 | `install [--yes] [--force] [dir]` | Backs up the official packages, shows exactly what will be replaced, asks, then runs `pkgman install`. The change takes effect after a reboot. |
@@ -100,8 +100,8 @@ tool rebuilds the system packages themselves:
 - `haiku_devel.hpkg`. It requires `haiku == <exact version>`, so it has to
   be rebuilt along with `haiku` whenever it's installed. It also ships the
   patched headers, so you can build apps against a new API.
-- On hybrid systems, `haiku_<arch>` and `haiku_<arch>_devel` for the
-  secondary architecture.
+- (Hybrid 32-bit systems would also need `haiku_<arch>` and
+  `haiku_<arch>_devel` for the secondary architecture; see Limits.)
 
 Other packages (`haiku_loader`, `haiku_datatranslators` and so on) only
 require `haiku` with no exact version, so they stay as they are.
@@ -112,12 +112,33 @@ The build works like this:
   mbox-format patches, otherwise `git apply --3way`. The patches are
   committed locally. The tree is reset to the base commit before every
   build, so builds can be repeated.
-- **Configure.** `configure` runs without arguments. On a Haiku host it
-  detects the architectures and uses the native gcc, so no cross-compiler is
-  needed.
+- **Cross tools, not the native gcc.** The tool clones the branch's
+  `buildtools` and runs
+  `configure --cross-tools-source … --build-cross-tools x86_64`, which builds
+  Haiku's own binutils and gcc on the Haiku machine. The build directory
+  is reused for later builds on the same branch, so this cost is paid once.
+  A native configure (no arguments, using the system gcc) looks simpler, but
+  it fails on x86_64 for two reasons, both found on the beta6 VM:
+  1. The `haiku` package includes the 32-bit BIOS and PXE boot loaders
+     (`data/platform_loaders/`). The native gcc has no 32-bit libgcc, so the
+     link fails (`undefined reference to __udivmoddi4`). The jam rule that
+     builds them is defined inside `src/system/boot/Jamfile`, so a
+     `UserBuildConfig` can't swap in prebuilt copies.
+  2. The branch pins `gcc_syslibs_devel` to one GCC version
+     (`build/jam/repositories/HaikuPorts/<arch>`; 13.3.0 on beta6), and the
+     build uses that package's headers. A different native gcc breaks the
+     build, for example GCC 15 with GCC 13 headers gives
+     ``attribute 'target' argument 'avx512er' is unknown``.
+
+  The cross tools come from the same branch, so they always match.
+- **Environment.** In non-login shells (`ssh host command`) the tool first
+  sources `/boot/system/boot/SetupEnvironment`. Without that, `LIBRARY_PATH`
+  is empty, the build's host tools can't find `/boot/system/lib`, and they
+  exit silently with status 3.
 - **Build.** The tool runs `jam -q -j<jobs> -sHAIKU_REVISION=<hrev>+<n>+<tag>
-  haiku.hpkg haiku_devel.hpkg …`. On a 4-core VM, expect about an hour or
-  more the first time; later builds are incremental.
+  haiku.hpkg haiku_devel.hpkg`. The first run on a branch includes the
+  cross tools; later builds are incremental and only rebuild what the
+  patches touch.
 
 ### 4. Versioning
 
@@ -159,8 +180,9 @@ is easy to recognize.
   loader would need `haiku_loader` and `makebootable`; that isn't handled.
 - The kernel inside `haiku.hpkg` is rebuilt as well. If the patch doesn't
   touch the kernel, it's built from identical source.
-- Only `x86_64` was tested. Other architectures and hybrid systems are
-  untested.
+- Only `x86_64` is supported, and the tool refuses other architectures.
+  32-bit hybrid systems (x86_gcc2 + x86) would need the legacy GCC 2 cross
+  tools as well.
 - Building needs network access (source and HaikuPorts build packages), about
   20 GiB of disk space and time.
 

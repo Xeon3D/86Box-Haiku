@@ -34,6 +34,14 @@ TAGS_URL=${HAIKU_GIT_TAGS:-https://review.haiku-os.org/haiku}
 SYSPKG=/boot/system/packages
 MIN_FREE_GB=8
 
+# Non-login shells (ssh user@host command, cron) have no LIBRARY_PATH. The
+# Haiku build runs its host tools with LIBRARY_PATH="$LIBRARY_PATH:<dir>",
+# which then drops /boot/system/lib and every tool exits with status 3
+# ("Cannot open file libbsd.so" in the syslog). Set up a login environment.
+if [ -z "$LIBRARY_PATH" ] && [ -f /boot/system/boot/SetupEnvironment ]; then
+	. /boot/system/boot/SetupEnvironment
+fi
+
 # git's automatic background maintenance ("git maintenance run --auto",
 # pack-refs) was seen hanging on Haiku after a fetch; never run it here.
 export GIT_CONFIG_COUNT=2
@@ -166,10 +174,12 @@ EOF
 	fi
 }
 
-# What a native (Haiku-hosted) build of the system packages needs. Images
-# would also need mtools and xorriso, but this tool only builds packages.
-DEPS="cmd:git cmd:jam cmd:gcc cmd:nasm cmd:bison cmd:flex cmd:python3
-	devel:libzstd devel:libz gcc_syslibs_devel"
+# What building the cross tools and the system packages on Haiku needs
+# (the host gcc only builds the cross gcc and the host tools). Images would
+# also need mtools and xorriso, but this tool only builds packages.
+DEPS="cmd:git cmd:jam cmd:gcc cmd:make cmd:nasm cmd:bison cmd:flex cmd:m4
+	cmd:makeinfo cmd:autoconf cmd:automake cmd:gawk cmd:python3
+	devel:libzstd devel:libz"
 
 cmd_doctor()
 {
@@ -189,10 +199,8 @@ cmd_doctor()
 	if [ -n "$missing" ]; then
 		echo "Missing build prerequisites:$missing"
 		if [ "$INSTALL_DEPS" = 1 ]; then
-			# No -y: gcc_syslibs_devel pins gcc_syslibs (and so gcc) to the
-			# repository version, which can upgrade the compiler and the
-			# system C++ runtime. pkgman shows that plan and asks first.
-			echo "Note: this may also upgrade gcc and gcc_syslibs; read pkgman's plan."
+			# No -y: pkgman shows its plan (which can include upgrades of
+			# packages already installed) and asks first.
 			pkgman install $missing || die "installing prerequisites failed"
 		else
 			echo "Install them with:  pkgman install$missing"
@@ -220,16 +228,17 @@ cmd_doctor()
 # Finds the commit that the installed package was built from.
 resolve_commit()
 {
+	# Prints "<commit> <branch>".
 	local tag=$1 count=$2 branch c n
-	if [ "$count" = 0 ]; then
-		git -C "$SRC" rev-parse "$tag^{commit}"
-		return
-	fi
 	for branch in $(branch_candidates); do
 		git -C "$SRC" rev-parse -q --verify "origin/$branch" >/dev/null \
 			|| continue
 		git -C "$SRC" merge-base --is-ancestor "$tag" "origin/$branch" \
 			2>/dev/null || continue
+		if [ "$count" = 0 ]; then
+			echo "$(git -C "$SRC" rev-parse "$tag^{commit}") $branch"
+			return 0
+		fi
 		# Walk the first-parent chain from the tag; the build revision
 		# "hrevX+N" is "git describe" = hrevX-N-g<sha>.
 		c=$(git -C "$SRC" rev-list --first-parent --reverse \
@@ -239,7 +248,7 @@ resolve_commit()
 		if [ "$n" = "$count" ] \
 			&& git -C "$SRC" describe --tags --match='hrev*' "$c" \
 				| grep -q "^$tag-$count-g"; then
-			echo "$c"
+			echo "$c $branch"
 			return 0
 		fi
 	done
@@ -264,12 +273,15 @@ cmd_fetch()
 	git -C "$SRC" fetch -q "$TAGS_URL" \
 		"refs/tags/$V_HREV:refs/tags/$V_HREV" || die "can't fetch $V_HREV"
 
-	local commit
-	commit=$(resolve_commit "$V_HREV" "$V_COUNT") \
+	local resolved commit branch
+	resolved=$(resolve_commit "$V_HREV" "$V_COUNT") \
 		|| die "can't find the commit for $V_HREV+$V_COUNT on:" \
 			"$(branch_candidates | tr '\n' ' ')"
-	note "System was built from $commit ($V_HREV+$V_COUNT)"
+	commit=${resolved% *}
+	branch=${resolved#* }
+	note "System was built from $commit ($V_HREV+$V_COUNT on $branch)"
 	echo "$commit" > "$WORK/$BASE_ID/base-commit"
+	echo "$branch" > "$WORK/$BASE_ID/base-branch"
 
 	git -C "$SRC" checkout -q -B "syspatch/$BASE_ID" "$commit" \
 		|| die "checkout failed"
@@ -282,7 +294,8 @@ cmd_build()
 	[ -n "$V_TAG" ] && die "the installed system is already a local build" \
 		"($VERSION). Run '$PROG restore' and reboot first, so the patches" \
 		"are applied to the official source."
-	[ -f "$WORK/$BASE_ID/base-commit" ] || cmd_fetch
+	[ -f "$WORK/$BASE_ID/base-commit" ] && [ -f "$WORK/$BASE_ID/base-branch" ] \
+		|| cmd_fetch
 	local base
 	base=$(cat "$WORK/$BASE_ID/base-commit")
 
@@ -308,14 +321,45 @@ cmd_build()
 		fi
 	done
 
+	# Build with Haiku's own cross tools from the branch's buildtools, not
+	# with the native gcc:
+	#  - the system package contains the 32-bit BIOS/PXE boot loaders, and
+	#    the native x86_64 gcc has no 32-bit libgcc to link them;
+	#  - the branch pins gcc_syslibs_devel to one gcc version, and its
+	#    headers don't work with a different native gcc (GCC 15 vs. 13).
+	# The tools are built once per branch and reused.
+	case $ARCH in
+		x86_64) ;;
+		*) die "only x86_64 systems are supported (this is $ARCH)" ;;
+	esac
+	local branch tools
+	branch=$(cat "$WORK/$BASE_ID/base-branch" 2>/dev/null) \
+		|| die "run '$PROG fetch' again (no base-branch recorded)"
+	tools=$WORK/buildtools-$branch
+	if [ ! -d "$tools/.git" ]; then
+		note "Cloning buildtools ($branch)"
+		git clone -q --depth 1 -b "$branch" "${MIRROR%/haiku}/buildtools" \
+			"$tools" 2>/dev/null \
+			|| git clone -q --depth 1 "${MIRROR%/haiku}/buildtools" "$tools" \
+			|| die "can't clone buildtools"
+	fi
+
 	local revision=$V_HREV
 	[ "$V_COUNT" != 0 ] && revision="$revision+$V_COUNT"
 	revision="$revision+$BUILD_TAG"
-	local gen=$SRC/generated.$ARCH
+	local gen=$SRC/generated.$ARCH config="cross:$branch"
+	if [ -d "$gen" ] && [ "$(cat "$gen/syspatch-config" 2>/dev/null)" != "$config" ]; then
+		note "Build directory was set up differently, starting from scratch"
+		rm -rf "$gen"
+	fi
 	mkdir -p "$gen"
 	if [ ! -f "$gen/build/BuildConfig" ]; then
-		note "Configuring (native tools)"
-		(cd "$gen" && ../configure) || die "configure failed"
+		note "Building the cross tools and configuring (once per branch;"
+		note "this takes a long time; log: $gen/syspatch-configure.log)"
+		(cd "$gen" && ../configure -j"$JOBS" --cross-tools-source "$tools" \
+			--build-cross-tools "$ARCH") > "$gen/syspatch-configure.log" 2>&1 \
+			|| { tail -30 "$gen/syspatch-configure.log"; die "configure failed"; }
+		echo "$config" > "$gen/syspatch-config"
 	fi
 
 	local targets="haiku.hpkg haiku_devel.hpkg" a
