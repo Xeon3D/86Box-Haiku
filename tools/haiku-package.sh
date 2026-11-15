@@ -4,6 +4,8 @@
 #
 #   tools/haiku-package.sh <qt|native> <build dir> [output dir]
 #
+# PKGREV sets the package revision (default 1).
+#
 # Runs on Haiku. The .hpkg's dependencies are worked out from the libraries
 # the binary links to: each one is looked up in /boot/system/lib and its
 # owning package (the SYS:PACKAGE attribute that packagefs sets) becomes a
@@ -40,7 +42,9 @@ base=$(sed -n '/^project(86Box/,/)/s/^ *VERSION \([0-9.]*\).*/\1/p' "$src/CMakeL
 date=$(git -C "$src" log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d)
 commit=$(git -C "$src" rev-parse --short=9 HEAD 2>/dev/null || echo unknown)
 version="${base}~git${date}"
-pkgrev=1
+# The package revision: raise it (PKGREV=2 ...) for another release of the
+# same version.
+pkgrev=${PKGREV:-1}
 
 work=$(mktemp -d /tmp/86box-package.XXXXXX)
 trap 'rm -rf "$work"' EXIT
@@ -72,6 +76,8 @@ root=$work/root
 mkdir -p "$root/apps/86Box" "$root/bin" "$root/data/deskbar/menu/Applications" \
          "$root/documentation/packages/$pkg"
 cp "$bin" "$root/apps/86Box/86Box"
+# The icon and signature attributes, from the resources the build added.
+mimeset -f "$root/apps/86Box/86Box"
 strip "$root/apps/86Box/86Box"
 ln -s ../apps/86Box/86Box "$root/bin/86Box"
 ln -s ../../../../apps/86Box/86Box "$root/data/deskbar/menu/Applications/86Box"
