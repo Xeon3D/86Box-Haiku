@@ -177,6 +177,37 @@ keyb_filter(BMessage *message, BHandler **target, BMessageFilter *filter)
 }
 
 static BMessageFilter *filter;
+
+#    include <dlfcn.h>
+
+/* Ask app_server to send this window every key while the mouse is captured,
+   including the system shortcuts (Command+F-keys, Ctrl+Tab and so on).
+   BWindow::SetKeyboardGrab() is not in any Haiku release yet, so look it up
+   at run time; on systems without it this does nothing. */
+static void
+haiku_set_keyboard_grab(BWindow *window, bool grab)
+{
+    typedef status_t (*set_keyboard_grab_t)(BWindow *, bool);
+    static set_keyboard_grab_t set_keyboard_grab = nullptr;
+    static bool                resolved          = false;
+
+    if (!resolved) {
+        resolved = true;
+        if (void *libbe = dlopen("libbe.so", RTLD_LAZY))
+            set_keyboard_grab = (set_keyboard_grab_t) dlsym(libbe, "_ZN7BWindow15SetKeyboardGrabEb");
+    }
+    if (!set_keyboard_grab || !window)
+        return;
+
+    /* Don't wait forever for the window's lock: its thread may itself be
+       waiting on the Qt thread. */
+    if (window->LockWithTimeout(250000) != B_OK)
+        return;
+    const status_t status = set_keyboard_grab(window, grab);
+    window->Unlock();
+    if (grab && (status != B_OK))
+        qWarning() << "BWindow::SetKeyboardGrab failed:" << strerror(status);
+}
 #endif
 
 #include <86box/cpu_events.h>
@@ -460,8 +491,12 @@ MainWindow::MainWindow(QWidget *parent)
 
         qt_mouse_capture(mouse_capture);
         if (mouse_capture) {
-            if (hook_enabled)
+            if (hook_enabled) {
                 this->grabKeyboard();
+#ifdef __HAIKU__
+                haiku_set_keyboard_grab((BWindow *) this->winId(), true);
+#endif
+            }
             if (ui->stackedWidget->mouse_capture_func) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
                 auto *win = ui->stackedWidget->captureWindow();
@@ -472,6 +507,9 @@ MainWindow::MainWindow(QWidget *parent)
             }
         } else {
             this->releaseKeyboard();
+#ifdef __HAIKU__
+            haiku_set_keyboard_grab((BWindow *) this->winId(), false);
+#endif
             if (ui->stackedWidget->mouse_uncapture_func) {
                 ui->stackedWidget->mouse_uncapture_func();
             }
