@@ -1,9 +1,12 @@
 name: Sync with upstream
 
-# Merges 86Box/86Box master into this fork's master once a day, then starts
+# Merges 86Box/86Box master into this repository's master once a day, then starts
 # the Haiku build. Merging goes through GitHub's "sync fork" API because, unlike
 # a git push with the workflow token, it can also bring in upstream changes to
-# .github/workflows. When the merge conflicts, the run fails and its summary
+# .github/workflows. A copy that isn't a GitHub fork (86Box-Haiku) can't use
+# that API, so it merges with git instead; that push needs a SYNC_TOKEN with
+# the workflow scope whenever upstream changed .github/workflows. When the
+# merge conflicts, the run fails and its summary
 # lists the conflicting files and how to resolve them by hand.
 
 on:
